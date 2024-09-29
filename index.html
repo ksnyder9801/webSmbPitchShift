@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Pitch Shift WebAssembly</title>
+    <script src="pitch_shift.js"></script>
+</head>
+
+<body>
+    <input type="file" id="audioFile" accept="audio/*" />
+    <button id="playButton" disabled>Play</button>
+    <button id="downloadButton" disabled>Download</button>
+
+
+    <div style="
+    display: grid;
+    grid-template-columns: 128px 64px;
+    gap: 4px;
+    font-family: Segoe UI, Verdana, sans-serif;
+    font-size: 12px;
+    border: 1px solid #ccc;
+    width: min-content;
+    padding: 8px;
+    margin-top: 16px;
+">
+        <label for="pitchShift">Pitch</label>
+        <select id="pitchShift">
+            <option value="-12">-12</option>
+            <option value="-11">-11</option>
+            <option value="-10">-10</option>
+            <option value="-9">-9</option>
+            <option value="-8">-8</option>
+            <option value="-7">-7</option>
+            <option value="-6">-6</option>
+            <option value="-5">-5</option>
+            <option value="-4">-4</option>
+            <option value="-3">-3</option>
+            <option value="-2">-2</option>
+            <option value="-1">-1</option>
+            <option value="0" selected>none</option>
+            <option value="1">+1</option>
+            <option value="2">+2</option>
+            <option value="3">+3</option>
+            <option value="4">+4</option>
+            <option value="5">+5</option>
+            <option value="6">+6</option>
+            <option value="7">+7</option>
+            <option value="8">+8</option>
+            <option value="9">+9</option>
+            <option value="10">+10</option>
+            <option value="11">+11</option>
+            <option value="12">+12</option>
+        </select>
+
+        <label for="osamp">Quality</label>
+        <select id="osamp">
+            <option value="4">4</option>
+            <option value="8">8</option>
+            <option value="16">16</option>
+            <option value="32" selected>32</option>
+            <option value="64">64</option>
+            <option value="128">128</option>
+        </select>
+        <!-- Dropdown for FFT Frame Size -->
+        <label for="fftFrameSize">FFT Size</label>
+        <select id="fftFrameSize">
+            <option value="256">256</option>
+            <option value="512">512</option>
+            <option value="1024">1024</option>
+            <option value="2048">2048</option>
+            <option value="4096" selected>4096</option>
+            <option value="8192">8192</option>
+        </select>
+
+        <button id="shiftButton">Pitch Shift</button>
+
+    </div>
+    <progress id="progress-bar" style="display:none"></progress>
+
+
+    <script>
+        // @ts-check
+        var pitch_shift;
+        Module().then(v => pitch_shift = v);
+        let audioContext = null;
+        let processedAudioBuffer = null;
+
+        let arrayBuffer;
+
+        // Example usage once module is loaded
+        document.getElementById('audioFile').addEventListener('change', function (event) {
+            var file = event.target.files[0];
+            var reader = new FileReader();
+            reader.onload = async function (e) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+                arrayBuffer = e.target.result;
+            }
+            reader.readAsArrayBuffer(file);
+        });
+
+        document.getElementById('shiftButton').addEventListener('click', async function (event) {
+            const Module = pitch_shift;
+            document.getElementById('progress-bar').style.display = 'inline-block';
+            // Decode the audio data
+            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+
+            // Concatenate left and right channels into a single buffer
+            const numChannels = audioBuffer.numberOfChannels;
+            const sampleRate = audioBuffer.sampleRate;
+            const numSampsToProcess = audioBuffer.length;
+
+            // Extract the left and right channel data
+            const leftChannel = audioBuffer.getChannelData(0);
+            const rightChannel = numChannels > 1 ? audioBuffer.getChannelData(1) : leftChannel; // If mono, duplicate the left channel
+
+            const indata = [leftChannel, rightChannel]; // Your input audio Float32Array from WAV file
+            const blank = new Float32Array(8192);
+            blank.fill(0);
+
+            const semitoneValue = parseInt(document.getElementById('pitchShift').value);
+            const pitchShiftFactor = Math.pow(2, semitoneValue / 12);
+
+            const fftFrameSize = parseInt(document.getElementById('fftFrameSize').value);
+            const osamp = parseInt(document.getElementById('osamp').value);
+
+            const outdata = [];
+            for (let i = 0; i < 2; i++) {
+                // Allocate memory in WebAssembly for the input and output buffers
+                const inBufferPointer = Module._malloc((numSampsToProcess + 8192) * indata[i].BYTES_PER_ELEMENT);
+                const outBufferPointer = Module._malloc((numSampsToProcess + 8192) * indata[i].BYTES_PER_ELEMENT);
+
+                // Copy input data (Float32Array) to the allocated memory in WebAssembly
+                Module.HEAPF32.set(indata[i], inBufferPointer / indata[i].BYTES_PER_ELEMENT);
+                Module.HEAPF32.set(blank, inBufferPointer / indata[i].BYTES_PER_ELEMENT + numSampsToProcess);
+
+
+                console.log('shifting');
+
+                // blank fftFrameSize reset to match openmpt
+                Module.ccall(
+                    'smbPitchShift',    // Function name in WebAssembly
+                    null,               // Return type (void in this case)
+                    ['number', 'number', 'number', 'number', 'number', 'number', 'number'], // Argument types
+                    [
+                        pitchShiftFactor,                // float pitchShift
+                        fftFrameSize,               // long numSampsToProcess
+                        fftFrameSize,                    // long fftFrameSize
+                        osamp,                           // long osamp
+                        sampleRate,                      // float sampleRate
+                        inBufferPointer + numSampsToProcess * 4,                 // float *indata (input buffer pointer)
+                        outBufferPointer                 // float *outdata (output buffer pointer)
+                    ]
+                );
+
+                Module.ccall(
+                    'smbPitchShift',    // Function name in WebAssembly
+                    null,               // Return type (void in this case)
+                    ['number', 'number', 'number', 'number', 'number', 'number', 'number'], // Argument types
+                    [
+                        pitchShiftFactor,                // float pitchShift
+                        numSampsToProcess + fftFrameSize,               // long numSampsToProcess
+                        fftFrameSize,                    // long fftFrameSize
+                        osamp,                           // long osamp
+                        sampleRate,                      // float sampleRate
+                        inBufferPointer,                 // float *indata (input buffer pointer)
+                        outBufferPointer                 // float *outdata (output buffer pointer)
+                    ]
+                );
+
+                console.log('done');
+
+                const outputData = new Float32Array(numSampsToProcess);
+                outputData.set(Module.HEAPF32.subarray(outBufferPointer / 4 + fftFrameSize, outBufferPointer / 4 + fftFrameSize + numSampsToProcess));
+
+                // Clean up: Free the allocated memory in WebAssembly
+                Module._free(inBufferPointer);
+                Module._free(outBufferPointer);
+
+                outdata.push(outputData);
+            }
+
+            // Create a stereo AudioBuffer and copy the de-interleaved data into the respective channels
+            processedAudioBuffer = audioContext.createBuffer(2, numSampsToProcess, sampleRate);
+            processedAudioBuffer.copyToChannel(outdata[0], 0);  // Copy left channel to channel 0
+            processedAudioBuffer.copyToChannel(outdata[1], 1); // Copy right channel to channel 1
+
+            document.getElementById('progress-bar').style.display = 'none';
+            document.getElementById('playButton').disabled = false;
+            document.getElementById('downloadButton').disabled = false;
+
+
+            document.getElementById('downloadButton').onclick = () => downloadWav(audioBufferToWav(processedAudioBuffer),
+                document.getElementById('audioFile').value.split(/[\/\\]/).slice(-1)[0].split('.')[0] + `_${semitoneValue}_${fftFrameSize}` ||
+                'processed_audio.wav');
+
+
+        });
+
+        // Function to play the processed audio
+        function playProcessedAudio() {
+            if (!processedAudioBuffer || !audioContext) return;
+
+            // Create a buffer source node
+            const source = audioContext.createBufferSource();
+            source.buffer = processedAudioBuffer;
+
+            // Connect the source to the AudioContext destination (speakers)
+            source.connect(audioContext.destination);
+
+            // Start playback
+            source.start();
+        }
+
+        function audioBufferToWav(buffer) {
+            const numChannels = buffer.numberOfChannels;
+            const sampleRate = buffer.sampleRate;
+            const format = 1; // PCM
+            const bitDepth = 16;
+
+            const numSamples = buffer.length * numChannels;
+            const wavBuffer = new ArrayBuffer(44 + numSamples * 2);
+            const view = new DataView(wavBuffer);
+
+            // Write WAV header
+            writeString(view, 0, 'RIFF');
+            view.setUint32(4, 36 + numSamples * 2, true); // file length
+            writeString(view, 8, 'WAVE');
+            writeString(view, 12, 'fmt ');
+            view.setUint32(16, 16, true); // PCM format
+            view.setUint16(20, format, true); // Audio format
+            view.setUint16(22, numChannels, true); // Number of channels
+            view.setUint32(24, sampleRate, true); // Sample rate
+            view.setUint32(28, sampleRate * numChannels * bitDepth / 8, true); // Byte rate
+            view.setUint16(32, numChannels * bitDepth / 8, true); // Block align
+            view.setUint16(34, bitDepth, true); // Bits per sample
+            writeString(view, 36, 'data');
+            view.setUint32(40, numSamples * 2, true); // Data chunk length
+
+            // Write the PCM samples
+            let offset = 44;
+            for (let i = 0; i < buffer.length; i++) {
+                for (let channel = 0; channel < numChannels; channel++) {
+                    let sample = buffer.getChannelData(channel)[i];
+                    sample = Math.max(-1, Math.min(1, sample)); // Clamp value to -1..1
+                    view.setInt16(offset, sample * 0x7FFF, true); // Convert to 16-bit PCM
+                    offset += 2;
+                }
+            }
+
+            return new Blob([view], { type: 'audio/wav' });
+        }
+
+        function downloadWav(wavBlob, filename) {
+            const url = URL.createObjectURL(wavBlob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+        document.getElementById('playButton').addEventListener('click', playProcessedAudio);
+
+    </script>
+</body>
+
+</html>

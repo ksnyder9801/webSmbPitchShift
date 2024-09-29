@@ -1,0 +1,1 @@
+emcc smbPitchShift.cpp -o pitch_shift.js -s EXPORTED_FUNCTIONS="['_smbPitchShift','_malloc','_free']" -s EXTRA_EXPORTED_RUNTIME_METHODS='["cwrap", "ccall"]' -s MODULARIZE=1 -s ENVIRONMENT='web' --no-entry
